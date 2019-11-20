@@ -1,0 +1,117 @@
+begin
+  external class demos= "demos.atr";
+  demos begin
+    ref(res) cache;
+    ref(rdist) unif_rand, ned_mc_delay, ned_snap_produce;
+    ref(rdist) array ned_radio_delay(1:5);
+    real PROBABILITY_2G, PROBABILITY_3G, PROBABILITY_4G, PROBABILITY_5G, PROBABILITY_WIFI;
+    real DATA_PLANE_DELAY, Tt, Mean_Ts, Tdp, lambda;
+    integer NO_OF_USERS;
+    real mean_delay_2G, mean_delay_3G, mean_delay_4G, mean_delay_5G, mean_delay_WIFI;
+    ref(Tally) avg_pckt_delay;
+    ref(Count) late_packets;
+
+
+
+    Entity class Packet(network_technology_); integer network_technology_;
+    begin
+      real packet_begin_time;
+      Transmission:
+      packet_begin_time:= time;
+      hold(ned_radio_delay(network_technology_).sample);
+      TransportNetwork:
+      hold(Tt);
+      MainCacheQueue:
+      cache.acquire(1);
+      hold(ned_mc_delay.sample);
+      cache.release(1);
+      DataPlane:
+      hold(Tdp);
+      avg_pckt_delay.update(time- packet_begin_time);
+      if time- packet_begin_time>200 then late_packets.update(1);
+    end;
+    
+
+
+    Entity class Generator(network_technology); integer network_technology;
+    begin
+      LOOP:
+      new Packet("Packet", network_technology).schedule(now);
+      hold(ned_snap_produce.sample);
+      repeat;
+    end;
+    
+
+
+    class User_Creator;
+    begin
+      integer i, j;
+      real array cum_net_tech_dist(1:5);
+      real random_number;
+
+      procedure form_cum_net_dist;
+      begin
+        cum_net_tech_dist(1):= PROBABILITY_2G;
+        cum_net_tech_dist(2):= cum_net_tech_dist(1)+ PROBABILITY_3G;
+        cum_net_tech_dist(3):= cum_net_tech_dist(2)+ PROBABILITY_4G;
+        cum_net_tech_dist(4):= cum_net_tech_dist(3)+ PROBABILITY_5G;
+        cum_net_tech_dist(5):= cum_net_tech_dist(4)+ PROBABILITY_WIFI;
+      end;
+
+      integer procedure get_network_technology;
+      begin
+        random_number:= unif_rand.sample;
+        for i:=1 step 1 until 5 do
+        begin
+          if random_number<= cum_net_tech_dist(i) then
+            goto ASSIGN_NETWORK;
+        end;
+        ASSIGN_NETWORK:
+        get_network_technology:= i;
+      end;
+
+      procedure assign_mean_delay;
+      begin
+        ned_radio_delay(1):- new NegExp("2G Delay", 1/mean_delay_2G);
+        ned_radio_delay(2):- new NegExp("3G Delay", 1/mean_delay_3G);
+        ned_radio_delay(3):- new NegExp("4G Delay", 1/mean_delay_4G);
+        ned_radio_delay(4):- new NegExp("5G Delay", 1/mean_delay_5G);
+        ned_radio_delay(5):- new NegExp("WIFI Delay", 1/mean_delay_WIFI);
+        ned_mc_delay:- new NegExp("Main Cache Delay", 1/Mean_Ts);
+        ned_snap_produce:- new NegExp("Inter-Snap Creation Time", lambda);
+      end;
+
+      procedure schedule_Generators;
+      begin
+        for j:=1 step 1 until NO_OF_USERS do
+        begin
+          new Generator("Generator", get_network_technology).schedule(0);
+        end;
+      end;
+
+      unif_rand:- new uniform("UniformDist", 0.0, 1.0);
+      form_cum_net_dist;
+      assign_mean_delay;
+    end;
+    
+    PROBABILITY_2G:= 0.1;
+    PROBABILITY_3G:= 0.15;
+    PROBABILITY_4G:= 0.45;
+    PROBABILITY_5G:= 0.05;
+    PROBABILITY_WIFI:=0.25;
+
+    mean_delay_2G:= 50; mean_delay_3G:= 30; mean_delay_4G:= 20; mean_delay_5G:=10; mean_delay_WIFI:= 25;
+    
+    Tt:= 50;
+    Mean_Ts:= 20;
+    Tdp:= 20;
+    lambda:= 0.01;
+    NO_OF_USERS:= 1;
+    DATA_PLANE_DELAY:= 20;
+    cache:- new res("Cache", 1);
+    avg_pckt_delay:- new Tally("AvgPcktDelay");
+    late_packets:- new Count("T>200msPckts");
+    new User_Creator.schedule_Generators;
+    hold(10000000);
+  end;
+end;

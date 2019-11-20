@@ -1,0 +1,192 @@
+begin
+  external class demos= "demos.atr";
+  demos begin
+    ref(res) mcache, bcache;
+    ref(rdist) unif_rand, ned_mc_delay, ned_bc_delay, ned_controller_delay, ned_pckt_produce, ned_cache_fail, ned_cache_restart, ned_controller_fail, ned_controller_restart;
+    ref(rdist) array ned_radio_delay(1:5);
+    real PROBABILITY_2G, PROBABILITY_3G, PROBABILITY_4G, PROBABILITY_5G, PROBABILITY_WIFI;
+    real Tt, Mean_Ts, Mean_Tbs, Mean_c, Mu_Rs, Mu_Rc, Mu_fs, Mu_fc, Tdp, lambda;
+    integer NO_OF_USERS, mc_fail, bc_fail, sdn_fail, max_queue_length;
+    real mean_delay_2G, mean_delay_3G, mean_delay_4G, mean_delay_5G, mean_delay_WIFI;
+    ref(Tally) avg_pckt_delay;
+    ref(Count) late_packets, lost_packets;
+
+    !Main Cache is an entity in the model which has two states- Working and Failed, number of packets in cache is dealt separately using global variables. mcache is a resource object modelled separate from MainCache;
+    Entity class MainCache;
+    begin
+      Priority:= 5;
+      LOOP:
+      Working:
+      hold(ned_cache_fail.sample);
+      Failure:
+      mcache.acquire(1);
+      mc_fail:= 1;
+      hold(ned_cache_restart.sample);
+      mcache.release(1);
+      mc_fail:= 0;
+      repeat;
+    end;
+
+    !Backup Cache has a similar class definition as Main Cache. bcache is a resource object modelled separate from this entity;
+    Entity class BackupCache;
+    begin
+      Priority:= 5;
+      LOOP:
+      Functioning:
+      hold(ned_cache_fail.sample);
+      Failed:
+      bc_fail:= 1;
+      bcache.acquire(1);
+      hold(ned_cache_restart.sample);
+      bcache.release(1);
+      bc_fail:= 0;
+      repeat;
+    end;
+
+    !Controller also takes two states- Working and Failed;
+    Entity class Controller;
+    begin
+      LOOP:
+      hold(ned_controller_fail.sample);
+      sdn_fail:= 1;
+      hold(ned_controller_restart.sample);
+      sdn_fail:= 0;
+      repeat;
+    end;
+
+    !Packet object takes in parameter network_technology which tells which access technology it will use for radio transmission;
+    !Packet definition follows the activity diagram from the modelling;
+    Entity class Packet(network_technology); integer network_technology;
+    begin
+      real packet_begin_time;
+      Transmission:
+      packet_begin_time:= time;
+      hold(ned_radio_delay(network_technology).sample);
+      TransportNetwork:
+      hold(Tt);
+      if mc_fail= 0 and mcache.length<max_queue_length then
+      begin
+        MainCacheQueue:
+        mcache.acquire(1);
+        hold(ned_mc_delay.sample);
+        mcache.release(1);
+      end
+      else
+      begin
+        if sdn_fail= 0 then
+        begin
+          hold(ned_controller_delay.sample);
+          if bc_fail= 0 and bcache.length<max_queue_length then
+          begin
+            bcache.acquire(1);
+            hold(ned_bc_delay.sample);
+            bcache.release(1);
+          end
+          else
+          begin
+            lost_packets.update(1);
+            goto skip;
+          end;
+        end
+        else
+        begin
+          lost_packets.update(1);
+          goto skip;
+        end;
+      end;
+      DataPlane:
+      hold(Tdp);
+      avg_pckt_delay.update(time- packet_begin_time);
+      if time- packet_begin_time>200 then late_packets.update(1);
+      skip:
+    end;
+    
+    !Generator here models a group of users who create packets on their devices;
+    !The Access Technology for the packets is chosen using a defined probability mass function;
+    Entity class Generator;
+    begin
+      integer i, j;
+      real array cum_net_tech_dist(1:5);
+      real random_number;
+
+      procedure form_cum_net_dist;
+      begin
+        cum_net_tech_dist(1):= PROBABILITY_2G;
+        cum_net_tech_dist(2):= cum_net_tech_dist(1)+ PROBABILITY_3G;
+        cum_net_tech_dist(3):= cum_net_tech_dist(2)+ PROBABILITY_4G;
+        cum_net_tech_dist(4):= cum_net_tech_dist(3)+ PROBABILITY_5G;
+        cum_net_tech_dist(5):= cum_net_tech_dist(4)+ PROBABILITY_WIFI;
+      end;
+
+      integer procedure get_network_technology;
+      begin
+        random_number:= unif_rand.sample;
+        for i:=1 step 1 until 5 do
+        begin
+          if random_number<= cum_net_tech_dist(i) then
+            goto ASSIGN_NETWORK;
+        end;
+        ASSIGN_NETWORK:
+        get_network_technology:= i;
+      end;
+
+      procedure assign_mean_delay;
+      begin
+        ned_radio_delay(1):- new NegExp("2G Delay", 1/mean_delay_2G);
+        ned_radio_delay(2):- new NegExp("3G Delay", 1/mean_delay_3G);
+        ned_radio_delay(3):- new NegExp("4G Delay", 1/mean_delay_4G);
+        ned_radio_delay(4):- new NegExp("5G Delay", 1/mean_delay_5G);
+        ned_radio_delay(5):- new NegExp("WIFI Delay", 1/mean_delay_WIFI);
+      end;
+
+      unif_rand:- new uniform("UniformDist", 0.0, 1.0);
+      form_cum_net_dist;
+      assign_mean_delay;
+      ned_pckt_produce:- new NegExp("Inter-Packet Creation Time", NO_OF_USERS*lambda);
+      LOOP:
+      new Packet("Packet", get_network_technology).schedule(now);
+      hold(ned_pckt_produce.sample);
+      repeat;
+    end;
+    
+    PROBABILITY_2G:= 0.1;
+    PROBABILITY_3G:= 0.15;
+    PROBABILITY_4G:= 0.45;
+    PROBABILITY_5G:= 0.05;
+    PROBABILITY_WIFI:=0.25;
+    mean_delay_2G:= 50; mean_delay_3G:= 30; mean_delay_4G:= 20; mean_delay_5G:=10; mean_delay_WIFI:= 25;
+    Tt:= 50;
+    Mean_Ts:= 20;
+    Mean_Tbs:= 30;
+    Mean_c:= 10;
+    Tdp:= 20;
+    lambda:= 0.01;
+    NO_OF_USERS:= 4;
+    max_queue_length:= 8;
+    Mu_Rs:= 10;
+    Mu_Rc:= 10;
+    Mu_fs:= 1/1000;
+    Mu_fc:= 1/10000;
+    ned_controller_fail:- new NegExp("WrkngSessnCntrlr", Mu_fc);
+    ned_controller_restart:- new NegExp("RstrtTimeCntrlr", Mu_Rc);
+    ned_cache_fail:- new NegExp("ActvSessnCche", Mu_fs);
+    ned_cache_restart:- new NegExp("RstrtTimeCche", Mu_Rs);
+    ned_mc_delay:- new NegExp("MainCacheDelay", 1/Mean_Ts);
+    ned_bc_delay:- new NegExp("BackupCacheDelay", 1/Mean_Tbs);
+    ned_controller_delay:- new NegExp("CntrlrDelay", 1/Mean_c);
+    mcache:- new res("Main Cache", 1);
+    bcache:- new res("Backup Cache", 1);
+    avg_pckt_delay:- new Tally("Packet Delay");
+    late_packets:- new Count("T>200msPckts");
+    lost_packets:- new Count("Lost Pckts");
+    new MainCache("Main Cache").schedule(2);
+    new BackupCache("BackupCache").schedule(5);
+    new Controller("Controller").schedule(0);
+    new Generator("Generator").schedule(0);
+    hold(10000000);
+    outtext("Number of Users");
+    outint(NO_OF_USERS, 10);
+    outtext("  Intensity");
+    outfix(lambda, 4, 10);
+  end;
+end;
